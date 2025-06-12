@@ -87,3 +87,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+import os
+st.write("현재 작업 경로:", os.getcwd())
+st.write("작업 경로 내 파일 목록:", os.listdir())
