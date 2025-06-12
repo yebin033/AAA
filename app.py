@@ -3,8 +3,8 @@ import pandas as pd
 import numpy as np
 import ast
 from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 
 @st.cache_data
@@ -13,30 +13,46 @@ def load_data():
     credits = pd.read_csv('tmdb_5000_credits_small.csv')
     return movies, credits
 
-def preprocess_data(movies, credits):
-    credits['crew'] = credits['crew'].apply(ast.literal_eval)
-
-    def get_director(crew_list):
-        for crew_member in crew_list:
-            if crew_member.get('job') == 'Director':
-                return crew_member.get('name')
+def extract_director(crew_data):
+    try:
+        crew = ast.literal_eval(crew_data)
+        for member in crew:
+            if member.get('job') == 'Director':
+                return member.get('name')
+    except:
         return np.nan
 
-    credits['director'] = credits['crew'].apply(get_director)
-    df = pd.merge(movies, credits[['id', 'director']], on='id')
+def preprocess_data(movies, credits):
+    credits['director'] = credits['crew'].apply(extract_director)
+    credits = credits[['id', 'director']]
 
-    # 장르 추출
-    df['genres'] = df['genres'].apply(ast.literal_eval)
-    df['genre'] = df['genres'].apply(lambda x: x[0]['name'] if len(x) > 0 else 'Unknown')
+    movies['id'] = movies['id'].astype(int)
+    credits['id'] = credits['id'].astype(int)
 
-    # 필요한 열만 추출
-    df = df[['budget', 'vote_average', 'runtime', 'revenue', 'director', 'genre']].dropna()
+    df = pd.merge(movies, credits, on='id')
 
-    # 상위 감독만 남기고 나머지는 Other
+    df = df[['budget', 'popularity', 'runtime', 'revenue', 'director', 'genres']]
+    df.dropna(inplace=True)
+
+    df = df[df['budget'] > 0]
+    df = df[df['revenue'] > 0]
+
+    # 장르에서 첫 번째 값만 추출
+    def get_first_genre(genres):
+        try:
+            genre_list = ast.literal_eval(genres)
+            if genre_list:
+                return genre_list[0]['name']
+        except:
+            return 'Unknown'
+
+    df['genre'] = df['genres'].apply(get_first_genre)
+    df.drop('genres', axis=1, inplace=True)
+
     top_directors = df['director'].value_counts().head(20).index
     df['director'] = df['director'].apply(lambda x: x if x in top_directors else 'Other')
 
-    # 원핫 인코딩
+    # 원-핫 인코딩
     director_encoder = OneHotEncoder(sparse_output=False)
     genre_encoder = OneHotEncoder(sparse_output=False)
 
@@ -46,74 +62,71 @@ def preprocess_data(movies, credits):
     director_cols = [f'director_{cat}' for cat in director_encoder.categories_[0]]
     genre_cols = [f'genre_{cat}' for cat in genre_encoder.categories_[0]]
 
-    df_director = pd.DataFrame(director_encoded, columns=director_cols, index=df.index)
-    df_genre = pd.DataFrame(genre_encoded, columns=genre_cols, index=df.index)
+    df_encoded = pd.concat([
+        df[['budget', 'popularity', 'runtime']],
+        pd.DataFrame(director_encoded, columns=director_cols, index=df.index),
+        pd.DataFrame(genre_encoded, columns=genre_cols, index=df.index)
+    ], axis=1)
 
-    df_final = pd.concat([df[['budget', 'vote_average', 'runtime']], df_director, df_genre], axis=1)
+    X = df_encoded
     y = df['revenue']
 
-    return df_final, y, director_encoder, genre_encoder
+    return X, y, director_encoder, genre_encoder
 
 def train_model(X, y):
     model = LinearRegression()
     model.fit(X, y)
     return model
 
-def predict_revenue(model, director_encoder, genre_encoder, budget, vote_avg, runtime, director, genre):
-    input_df = pd.DataFrame([[budget, vote_avg, runtime]], columns=['budget', 'vote_average', 'runtime'])
+def predict_revenue(budget, popularity, runtime, director, genre, director_enc, genre_enc, model):
+    input_dict = {
+        'budget': [budget],
+        'popularity': [popularity],
+        'runtime': [runtime]
+    }
 
     # 인코딩
-    director_encoded = director_encoder.transform([[director]])
-    genre_encoded = genre_encoder.transform([[genre]])
+    director_array = director_enc.transform([[director]])
+    genre_array = genre_enc.transform([[genre]])
 
-    dir_cols = [f'director_{cat}' for cat in director_encoder.categories_[0]]
-    gen_cols = [f'genre_{cat}' for cat in genre_encoder.categories_[0]]
+    director_cols = [f'director_{cat}' for cat in director_enc.categories_[0]]
+    genre_cols = [f'genre_{cat}' for cat in genre_enc.categories_[0]]
 
-    df_dir = pd.DataFrame(director_encoded, columns=dir_cols)
-    df_gen = pd.DataFrame(genre_encoded, columns=gen_cols)
+    input_df = pd.DataFrame(input_dict)
+    director_df = pd.DataFrame(director_array, columns=director_cols)
+    genre_df = pd.DataFrame(genre_array, columns=genre_cols)
 
-    input_all = pd.concat([input_df, df_dir, df_gen], axis=1)
+    full_input = pd.concat([input_df, director_df, genre_df], axis=1)
 
-    # 누락된 열 채우기
-    missing_cols = set(model.feature_names_in_) - set(input_all.columns)
-    for col in missing_cols:
-        input_all[col] = 0
+    # 누락된 컬럼 보완
+    model_columns = model.feature_names_in_
+    for col in model_columns:
+        if col not in full_input.columns:
+            full_input[col] = 0
 
-    input_all = input_all[model.feature_names_in_]
+    full_input = full_input[model_columns]
 
-    return model.predict(input_all)[0]
-
-# ======================== Streamlit 앱 ========================
+    prediction = model.predict(full_input)[0]
+    return prediction
 
 def main():
     st.title("🎬 영화 수익 예측기")
-    st.write("영화의 기본 정보를 입력하면 예측 수익을 알려줍니다!")
 
     movies, credits = load_data()
-    X, y, director_encoder, genre_encoder = preprocess_data(movies, credits)
+    X, y, director_enc, genre_enc = preprocess_data(movies, credits)
     model = train_model(X, y)
 
-    st.sidebar.header("입력값을 설정하세요")
+    st.subheader("입력값을 바탕으로 수익 예측")
+    budget = st.number_input("예산 (USD)", value=1_000_000)
+    popularity = st.slider("인기도", 0.0, 100.0, 10.0)
+    runtime = st.slider("러닝타임 (분)", 30, 240, 120)
 
-    budget = st.sidebar.number_input("예산 (USD)", min_value=0, value=10000000, step=1000000)
-    vote_avg = st.sidebar.slider("평균 평점", 0.0, 10.0, 7.0, 0.1)
-    runtime = st.sidebar.number_input("상영시간 (분)", min_value=30, value=100, step=5)
+    director = st.selectbox("감독", director_enc.categories_[0])
+    genre = st.selectbox("장르", genre_enc.categories_[0])
 
-    directors = list(director_encoder.categories_[0])
-    genres = list(genre_encoder.categories_[0])
-
-    director = st.sidebar.selectbox("감독", directors)
-    genre = st.sidebar.selectbox("장르", genres)
-
-    if st.sidebar.button("수익 예측하기"):
-        revenue = predict_revenue(model, director_encoder, genre_encoder, budget, vote_avg, runtime, director, genre)
-        st.success(f"📈 예측된 수익: **${int(revenue):,} USD**")
-
-        # 평가 점수 표시
-        y_pred = model.predict(X)
-        rmse = np.sqrt(mean_squared_error(y, y_pred))
-        r2 = r2_score(y, y_pred)
-        st.write(f"📊 모델 성능 - RMSE: {rmse:,.2f}, R²: {r2:.2f}")
+    if st.button("수익 예측하기"):
+        revenue = predict_revenue(budget, popularity, runtime, director, genre, director_enc, genre_enc, model)
+        st.success(f"예측된 수익: ${revenue:,.0f}")
 
 if __name__ == "__main__":
     main()
