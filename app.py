@@ -1,80 +1,107 @@
-import streamlit as st
 import pandas as pd
-import plotly.express as px
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error
+import streamlit as st
+import ast
 
-def load_data():
-    # 데이터 로드 함수
-    # 파일 경로는 실제 환경에 맞게 조정 필요
-    movies = pd.read_csv("tmdb_5000_movies_small.csv")
-    credits = pd.read_csv("tmdb_5000_credits_small.csv")
-    return movies, credits
+# 감독 이름을 crew JSON 문자열에서 추출하는 함수
+def extract_director(crew_str):
+    crew = ast.literal_eval(crew_str)  # 문자열을 리스트로 변환
+    for member in crew:
+        if member.get('job') == 'Director':  # 감독 역할 찾기
+            return member.get('name')  # 감독 이름 반환
+    return 'Unknown'  # 감독 정보 없으면 'Unknown'
+
+# 장르 리스트를 genres JSON 문자열에서 추출하는 함수
+def extract_genres(genres_str):
+    genres = ast.literal_eval(genres_str)  # 문자열을 리스트로 변환
+    return [genre['name'] for genre in genres]  # 장르 이름 리스트 반환
+
+# 데이터 전처리 함수: movies, credits 합치고 인코딩 수행
+def preprocess_data(movies, credits):
+    credits = credits.rename(columns={'movie_id': 'id'})  # 영화 id 컬럼명 통일
+    credits['director'] = credits['crew'].apply(extract_director)  # 감독 이름 추출
+
+    # movies와 credits 데이터프레임 합침 (id 기준)
+    df = pd.merge(movies, credits[['id', 'director']], on='id')
+
+    # genres 컬럼에서 장르 이름들을 ,로 연결한 문자열로 변환
+    df['genres'] = df['genres'].apply(lambda x: ','.join(extract_genres(x)))
+
+    # 예측에 필요한 컬럼만 선택하고 결측값 제거
+    df = df[['budget', 'popularity', 'runtime', 'director', 'genres', 'revenue']].dropna()
+
+    # 감독명과 장르명을 숫자 레이블로 변환 (머신러닝 입력용)
+    director_enc = LabelEncoder()
+    genre_enc = LabelEncoder()
+    df['director_encoded'] = director_enc.fit_transform(df['director'])
+    df['genres_encoded'] = genre_enc.fit_transform(df['genres'])
+
+    # 특성(입력) 변수와 목표 변수 분리
+    X = df[['budget', 'popularity', 'runtime', 'director_encoded', 'genres_encoded']]
+    y = df['revenue']
+
+    return df, X, y, director_enc, genre_enc
 
 def main():
-    # 페이지 기본 설정
-    st.set_page_config(page_title="영화 수익 예측 대시보드", layout="wide")
+    # Streamlit 앱 기본 설정
+    st.set_page_config(page_title="영화 수익 예측 앱", page_icon="🎬", layout="centered")
+    st.title("🎥 영화 수익 예측 앱")
+    st.write("영화의 예산, 인기도, 상영 시간, 감독, 장르 정보를 선택하면 수익을 예측합니다.")
 
-    # 사이드바에 메뉴 구성
-    st.sidebar.title("메뉴")
-    page = st.sidebar.radio("탭 선택", ["데이터 요약", "수익 예측", "감독 정보"])
+    # 데이터 파일 읽기 (적절히 경로 및 파일명 조정)
+    movies = pd.read_csv('tmdb_5000_movies_small.csv')
+    credits = pd.read_csv('tmdb_5000_credits_small.csv')
 
-    # 데이터 로드 (최초 한 번만)
-    movies, credits = load_data()
+    # 데이터 전처리 및 인코더 생성
+    df, X, y, director_enc, genre_enc = preprocess_data(movies, credits)
 
-    # 데이터 요약 및 시각화 탭
-    if page == "데이터 요약":
-        st.header("영화 데이터 요약 및 시각화")
+    # 학습용, 테스트용 데이터 분리 (80% / 20%)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-        # 감독별 평균 수익 계산
-        # 여기서 'director' 컬럼이 movies 데이터에 있다고 가정
-        # 실제 데이터에 맞게 컬럼명 확인 및 수정 필요
-        if "director" not in movies.columns or "revenue" not in movies.columns:
-            st.error("movies 데이터에 'director' 또는 'revenue' 컬럼이 없습니다.")
-            return
+    # 랜덤 포레스트 회귀 모델 학습
+    model = RandomForestRegressor(random_state=42)
+    model.fit(X_train, y_train)
 
-        director_revenue = movies.groupby("director")["revenue"].mean().sort_values(ascending=False).head(10)
+    # 테스트 데이터 예측 및 RMSE(평균 오차) 계산
+    y_pred = model.predict(X_test)
+    rmse = mean_squared_error(y_test, y_pred) ** 0.5
+    st.write(f"🔍 테스트 데이터 RMSE: **{rmse:,.0f} 달러**")
 
-        # Plotly로 막대 그래프 생성
-        fig = px.bar(director_revenue,
-                     x=director_revenue.index,
-                     y=director_revenue.values,
-                     labels={"x":"감독", "y":"평균 수익"},
-                     title="상위 10명 감독의 평균 수익")
-        st.plotly_chart(fig, use_container_width=True)
+    st.header("영화 정보 입력")
 
-    # 수익 예측 탭
-    elif page == "수익 예측":
-        st.header("영화 수익 예측")
+    # 예산, 인기도, 상영 시간 숫자 입력
+    budget = st.number_input('예산 (달러)', min_value=0, value=10000000, step=1000000)
+    popularity = st.number_input('인기도', min_value=0.0, value=10.0, step=0.1)
+    runtime = st.number_input('상영 시간 (분)', min_value=1, value=120, step=1)
 
-        # 영화 제목 선택 박스
-        movie_title = st.selectbox("예측할 영화 선택", movies["title"].tolist())
-        st.write("선택한 영화:", movie_title)
+    # 감독 선택: 데이터 내 고유 감독 목록에서 선택
+    directors = sorted(df['director'].unique())
+    director_name = st.selectbox('감독 선택', directors)
 
-        # 예측 실행 버튼
-        if st.button("수익 예측 실행"):
-            # 실제 모델 코드는 여기서 호출하거나 작성해야 함
-            st.info("수익 예측 모델을 실행합니다... (구현 예정)")
+    # 장르 선택: 데이터 내 고유 장르 목록에서 선택
+    genres = sorted(df['genres'].unique())
+    genre_name = st.selectbox('장르 선택', genres)
 
-    # 감독 정보 탭
-    elif page == "감독 정보":
-        st.header("감독 상세 정보")
+    if st.button("🎯 예측하기"):
+        # 선택된 감독과 장르를 인코딩된 숫자로 변환
+        director_encoded = director_enc.transform([director_name])[0]
+        genre_encoded = genre_enc.transform([genre_name])[0]
 
-        # 감독 리스트에서 선택
-        if "director" not in movies.columns:
-            st.error("movies 데이터에 'director' 컬럼이 없습니다.")
-            return
+        # 모델에 입력할 데이터 프레임 생성
+        input_data = pd.DataFrame({
+            'budget': [budget],
+            'popularity': [popularity],
+            'runtime': [runtime],
+            'director_encoded': [director_encoded],
+            'genres_encoded': [genre_encoded]
+        })
 
-        director_list = movies["director"].dropna().unique()
-        selected_director = st.selectbox("감독 선택", director_list)
-
-        st.write(f"선택된 감독: {selected_director}")
-
-        # 선택 감독 작품 목록과 평균 수익 계산
-        director_movies = movies[movies["director"] == selected_director]
-        st.write("작품 목록:")
-        st.dataframe(director_movies[["title", "release_date", "revenue"]])
-
-        avg_revenue = director_movies["revenue"].mean()
-        st.write(f"평균 수익: {avg_revenue:,.0f} 달러")
+        # 영화 수익 예측
+        pred_revenue = model.predict(input_data)[0]
+        st.success(f"예측된 영화 수익: **{pred_revenue:,.0f} 달러** 🎉")
 
 if __name__ == "__main__":
     main()
