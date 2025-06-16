@@ -51,7 +51,7 @@ def main():
     st.title("🎥 영화 수익 예측 앱")
     st.write("영화의 예산, 인기도, 상영 시간, 감독, 장르 정보를 선택하면 수익을 예측합니다.")
 
-    # 데이터 파일 읽기 (크기 줄인 버전 사용 권장)
+    # 데이터 파일 읽기 (적절히 경로 및 파일명 조정)
     movies = pd.read_csv('tmdb_5000_movies_small.csv')
     credits = pd.read_csv('tmdb_5000_credits_small.csv')
 
